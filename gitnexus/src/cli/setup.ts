@@ -39,7 +39,10 @@ function resolveGitnexusBin(): string | null {
       timeout: 5000,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const lines = output.split('\n').map((l) => l.trim()).filter(Boolean);
+    const lines = output
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
 
     if (isWin) {
       // On Windows, `where` returns multiple entries (e.g. the POSIX shell

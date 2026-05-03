@@ -263,9 +263,7 @@ describe('setupClaudeCode', () => {
   it('falls back to first line on Windows when no .cmd/.bat wrapper found', async () => {
     setPlatform('win32');
     // Edge case: where returns only the POSIX script (no .cmd wrapper)
-    execFileSyncMock.mockReturnValueOnce(
-      'C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus\n',
-    );
+    execFileSyncMock.mockReturnValueOnce('C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus\n');
 
     const { setupCommand } = await import('../../src/cli/setup.js');
     await setupCommand();
