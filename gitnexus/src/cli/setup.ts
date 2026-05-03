@@ -43,9 +43,9 @@ function resolveGitnexusBin(): string | null {
 
     if (isWin) {
       // On Windows, `where` returns multiple entries (e.g. the POSIX shell
-      // script AND the .cmd wrapper). Prefer the .cmd wrapper because
+      // script AND the .cmd/.bat wrapper). Prefer the wrapper because
       // child_process.spawn() cannot execute a shell script directly.
-      const cmdLine = lines.find((l) => l.toLowerCase().endsWith('.cmd'));
+      const cmdLine = lines.find((l) => /\.(cmd|bat)$/i.test(l));
       return cmdLine || lines[0] || null;
     }
 

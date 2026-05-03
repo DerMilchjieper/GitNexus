@@ -204,4 +204,23 @@ describe('setupClaudeCode', () => {
       args: ['mcp'],
     });
   });
+
+  it('falls back to first line on Windows when no .cmd/.bat wrapper found', async () => {
+    setPlatform('win32');
+    // Edge case: where returns only the POSIX script (no .cmd wrapper)
+    execFileSyncMock.mockReturnValueOnce(
+      'C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus\n',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+    await setupCommand();
+
+    const raw = await fs.readFile(path.join(tempHome, '.claude.json'), 'utf-8');
+    const config = JSON.parse(raw);
+
+    expect(config.mcpServers.gitnexus).toEqual({
+      command: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus',
+      args: ['mcp'],
+    });
+  });
 });
