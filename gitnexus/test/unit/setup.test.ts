@@ -185,4 +185,23 @@ describe('setupClaudeCode', () => {
       args: ['-y', 'gitnexus@latest', 'mcp'],
     });
   });
+
+  it('picks .cmd wrapper from Windows where output (multiple lines)', async () => {
+    setPlatform('win32');
+    // `where gitnexus` on Windows returns the POSIX script first, then .cmd
+    execFileSyncMock.mockReturnValueOnce(
+      'C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus\nC:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus.cmd\n',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+    await setupCommand();
+
+    const raw = await fs.readFile(path.join(tempHome, '.claude.json'), 'utf-8');
+    const config = JSON.parse(raw);
+
+    expect(config.mcpServers.gitnexus).toEqual({
+      command: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\gitnexus.cmd',
+      args: ['mcp'],
+    });
+  });
 });
