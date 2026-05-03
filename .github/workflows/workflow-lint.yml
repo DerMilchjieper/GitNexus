@@ -42,8 +42,10 @@ jobs:
 
       # Initial threshold: medium. High+ findings fail the job; medium findings
       # appear in the Security tab without blocking. Tune after first run.
+      # Per-rule exemptions for pre-existing intentional patterns live in
+      # .github/zizmor.yml (each carries a documented mitigation).
       - name: Run zizmor
-        run: zizmor --format sarif --min-severity medium . > zizmor.sarif
+        run: zizmor --config .github/zizmor.yml --format sarif --min-severity medium . > zizmor.sarif
         continue-on-error: true
 
       - name: Upload SARIF
@@ -53,4 +55,4 @@ jobs:
           category: zizmor
 
       - name: Fail on high+ findings
-        run: zizmor --min-severity high .
+        run: zizmor --config .github/zizmor.yml --min-severity high .
