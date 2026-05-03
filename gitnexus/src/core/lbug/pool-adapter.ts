@@ -79,8 +79,19 @@ const dbCache = new Map<string, SharedDB>();
 const MAX_POOL_SIZE = 5;
 /** Idle timeout before closing a repo's connections */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-/** Max connections per repo (caps concurrent queries per repo) */
-const MAX_CONNS_PER_REPO = 8;
+/**
+ * Max connections per repo.
+ *
+ * Conservative default:
+ * - The multi-connection read pool is the right long-term shape for LadybugDB.
+ * - On this workstation we observed repeated WAL corruption/assertion failures
+ *   on the direct tool path (`context` / `impact`) after successful analyze
+ *   runs, while the single-process web path remained healthy.
+ * - Keeping the pool at a single connection avoids pre-warming multiple
+ *   readers against the same store until the upstream WAL/read-only stability
+ *   issue is fully understood.
+ */
+const MAX_CONNS_PER_REPO = 1;
 
 let idleTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -247,9 +258,43 @@ const WAITER_TIMEOUT_MS = 15_000;
 
 const LOCK_RETRY_ATTEMPTS = 3;
 const LOCK_RETRY_DELAY_MS = 2000;
+const CORRUPTED_WAL_PATTERNS = ['Corrupted wal file', 'invalid WAL record type'] as const;
 
 /** Deduplicates concurrent initLbug calls for the same repoId */
 const initPromises = new Map<string, Promise<void>>();
+
+function isCorruptedWalError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const lowered = message.toLowerCase();
+  return CORRUPTED_WAL_PATTERNS.some((pattern) => lowered.includes(pattern.toLowerCase()));
+}
+
+function walBackupSuffix(): string {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+async function recoverCorruptedWal(dbPath: string): Promise<boolean> {
+  const walPath = `${dbPath}.wal`;
+  const lockPath = `${dbPath}.lock`;
+
+  try {
+    await fs.stat(lockPath);
+    return false;
+  } catch {
+    // No active lock file visible — continue.
+  }
+
+  try {
+    await fs.stat(walPath);
+  } catch {
+    return false;
+  }
+
+  const backupPath = `${walPath}.bak-${walBackupSuffix()}`;
+  await fs.rename(walPath, backupPath);
+  console.error(`GitNexus: moved aside corrupt WAL ${walPath} -> ${backupPath}`);
+  return true;
+}
 
 /**
  * Initialize (or reuse) a Database + connection pool for a specific repo.
@@ -295,79 +340,115 @@ async function doInitLbug(repoId: string, dbPath: string): Promise<void> {
 
   evictLRU();
 
-  // Reuse an existing native Database if another repoId already opened this path.
-  // This prevents buffer manager exhaustion from multiple mmap regions on the same file.
-  let shared = dbCache.get(dbPath);
-  if (!shared) {
-    // Open in read-only mode — MCP server never writes to the database.
-    // This allows multiple MCP server instances to read concurrently, and
-    // avoids lock conflicts when `gitnexus analyze` is writing.
-    let lastError: Error | null = null;
-    for (let attempt = 1; attempt <= LOCK_RETRY_ATTEMPTS; attempt++) {
-      silenceStdout();
-      try {
-        const db = createLbugDatabase(lbug, dbPath, { readOnly: true });
-        restoreStdout();
-        shared = { db, refCount: 0, ftsLoaded: false };
-        dbCache.set(dbPath, shared);
-        break;
-      } catch (err: any) {
-        restoreStdout();
-        lastError = err instanceof Error ? err : new Error(String(err));
-        const isLockError =
-          lastError.message.includes('Could not set lock') || lastError.message.includes('lock');
-        if (!isLockError || attempt === LOCK_RETRY_ATTEMPTS) break;
-        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY_MS * attempt));
+  let healedCorruptWal = false;
+
+  for (;;) {
+    // Reuse an existing native Database if another repoId already opened this path.
+    // This prevents buffer manager exhaustion from multiple mmap regions on the same file.
+    let shared = dbCache.get(dbPath);
+    let createdShared = false;
+
+    try {
+      if (!shared) {
+        // Open in writable mode inside the process.
+        //
+        // Rationale:
+        // - The direct tool path (`context` / `impact`) on this workstation hit
+        //   repeatable LadybugDB WAL corruption/assertion failures after clean
+        //   re-indexes when the pool opened the store read-only.
+        // - The single-process web/server path, which uses the writable adapter,
+        //   remained healthy against the same rebuilt index.
+        // - We prefer lock contention with explicit retries over silent store
+        //   corruption. Cross-process contention still surfaces as a lock error
+        //   and is retried below.
+        let lastError: Error | null = null;
+        for (let attempt = 1; attempt <= LOCK_RETRY_ATTEMPTS; attempt++) {
+          silenceStdout();
+          try {
+            const db = createLbugDatabase(lbug, dbPath, { readOnly: false });
+            restoreStdout();
+            shared = { db, refCount: 0, ftsLoaded: false };
+            dbCache.set(dbPath, shared);
+            createdShared = true;
+            break;
+          } catch (err: any) {
+            restoreStdout();
+            lastError = err instanceof Error ? err : new Error(String(err));
+            const isLockError =
+              lastError.message.includes('Could not set lock') || lastError.message.includes('lock');
+            if (!isLockError || attempt === LOCK_RETRY_ATTEMPTS) {
+              throw lastError;
+            }
+            await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY_MS * attempt));
+          }
+        }
       }
-    }
 
-    if (!shared) {
-      throw new Error(
-        `LadybugDB unavailable for ${repoId}. Another process may be rebuilding the index. ` +
-          `Retry later. (${lastError?.message || 'unknown error'})`,
-      );
+      if (!shared) {
+        throw new Error(`LadybugDB unavailable for ${repoId}. Another process may be rebuilding the index.`);
+      }
+
+      shared.refCount++;
+      const db = shared.db;
+
+      // Pre-create the full pool upfront so createConnection() (which silences
+      // stdout) is never called lazily during active query execution.
+      // Mark preWarmActive so the watchdog timer doesn't interfere.
+      preWarmActive = true;
+      const available: lbug.Connection[] = [];
+      try {
+        for (let i = 0; i < MAX_CONNS_PER_REPO; i++) {
+          available.push(createConnection(db));
+        }
+      } finally {
+        preWarmActive = false;
+      }
+
+      // Load FTS extension once per shared Database.
+      // Done BEFORE pool registration so no concurrent checkout can grab
+      // the connection while the async FTS load is in progress.
+      // policy: 'load-only' — the read pool must never trigger a network
+      // install; analyze owns extension installation. If LOAD fails, search
+      // features degrade gracefully and the user-facing query path proceeds.
+      if (!shared.ftsLoaded) {
+        shared.ftsLoaded = await loadFTSExtension(available[0], { policy: 'load-only' });
+      }
+
+      // Register pool entry only after all connections are pre-warmed and FTS is
+      // loaded. Concurrent executeQuery calls see either "not initialized"
+      // (and throw cleanly) or a fully ready pool — never a half-built one.
+      pool.set(repoId, {
+        db,
+        available,
+        checkedOut: 0,
+        waiters: [],
+        lastUsed: Date.now(),
+        dbPath,
+        closed: false,
+      });
+      ensureIdleTimer();
+      return;
+    } catch (err) {
+      const sharedForCleanup = dbCache.get(dbPath);
+      if (sharedForCleanup && createdShared) {
+        try {
+          await sharedForCleanup.db.close();
+        } catch {
+          // Best-effort cleanup after a failed init.
+        }
+        dbCache.delete(dbPath);
+      } else if (sharedForCleanup) {
+        sharedForCleanup.refCount = Math.max(0, sharedForCleanup.refCount - 1);
+      }
+
+      if (!healedCorruptWal && isCorruptedWalError(err) && (await recoverCorruptedWal(dbPath))) {
+        healedCorruptWal = true;
+        continue;
+      }
+
+      throw err;
     }
   }
-
-  shared.refCount++;
-  const db = shared.db;
-
-  // Pre-create the full pool upfront so createConnection() (which silences
-  // stdout) is never called lazily during active query execution.
-  // Mark preWarmActive so the watchdog timer doesn't interfere.
-  preWarmActive = true;
-  const available: lbug.Connection[] = [];
-  try {
-    for (let i = 0; i < MAX_CONNS_PER_REPO; i++) {
-      available.push(createConnection(db));
-    }
-  } finally {
-    preWarmActive = false;
-  }
-
-  // Load FTS extension once per shared Database.
-  // Done BEFORE pool registration so no concurrent checkout can grab
-  // the connection while the async FTS load is in progress.
-  // policy: 'load-only' — the read pool must never trigger a network
-  // install; analyze owns extension installation. If LOAD fails, search
-  // features degrade gracefully and the user-facing query path proceeds.
-  if (!shared.ftsLoaded) {
-    shared.ftsLoaded = await loadFTSExtension(available[0], { policy: 'load-only' });
-  }
-
-  // Register pool entry only after all connections are pre-warmed and FTS is
-  // loaded.  Concurrent executeQuery calls see either "not initialized"
-  // (and throw cleanly) or a fully ready pool — never a half-built one.
-  pool.set(repoId, {
-    db,
-    available,
-    checkedOut: 0,
-    waiters: [],
-    lastUsed: Date.now(),
-    dbPath,
-    closed: false,
-  });
-  ensureIdleTimer();
 }
 
 /**
