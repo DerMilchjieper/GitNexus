@@ -54,7 +54,11 @@ jobs:
           tags: scan-target:${{ matrix.image.name }}
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@master
+        # Pinned to a released tag rather than @master — moving refs are a
+        # supply-chain risk and zizmor (added in this same plan) flags them.
+        # Convert to commit SHA in the same follow-up that pins the other
+        # net-new actions.
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: scan-target:${{ matrix.image.name }}
           format: sarif
