@@ -31,14 +31,14 @@ jobs:
           # Full history needed for the on-push full-history scan; on PRs the
           # action diffs against the base ref so the cost is bounded by the PR.
           fetch-depth: 0
+          # Don't bake the token into the cloned .git/config; downstream
+          # steps (and Gitleaks itself) don't need it for repo operations.
+          persist-credentials: false
 
-      # NOTE: gitleaks/gitleaks-action pin uses major-version tag on initial
-      # introduction; convert to commit SHA in a follow-up PR.
-      #
       # No GITLEAKS_LICENSE secret is required for OSS / public-repo usage.
       # If this repo becomes private, the action will require a license key.
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true

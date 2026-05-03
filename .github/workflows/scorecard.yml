@@ -37,10 +37,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # NOTE: ossf/scorecard-action pin uses major-version tag on initial
-      # introduction; convert to commit SHA in a follow-up PR.
       - name: Run Scorecard
-        uses: ossf/scorecard-action@v2
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
         with:
           results_file: results.sarif
           results_format: sarif
@@ -55,6 +53,6 @@ jobs:
           retention-days: 5
 
       - name: Upload to Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84 # v3.35.3
         with:
           sarif_file: results.sarif

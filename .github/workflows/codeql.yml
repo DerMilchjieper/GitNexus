@@ -40,12 +40,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config for downstream steps to read.
+          persist-credentials: false
 
-      # NOTE: github/codeql-action third-party pins use major-version tags on
-      # initial introduction; convert to commit SHAs in a follow-up PR before
-      # promoting CodeQL to a required check (see plan § Deferred to Follow-Up).
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@0daab03d71ff584ef619d027a3fd9146679c5d84 # v3.35.3
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
@@ -62,6 +62,6 @@ jobs:
               - 'gitnexus/src/core/parsing/**/parser.js'
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@0daab03d71ff584ef619d027a3fd9146679c5d84 # v3.35.3
         with:
           category: '/language:${{ matrix.language }}'
